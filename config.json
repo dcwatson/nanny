@@ -1,0 +1,26 @@
+{
+    "processes": {
+        "sleeper": {
+            "cmd": ["sleep", "1"],
+            "env": {}
+        },
+        "crasher": {
+            "cmd": ["./testapps/crasher.py"],
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            }
+        },
+        "timer": {
+            "cmd": ["./testapps/timer.py"],
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            }
+        },
+        "stubborn": {
+            "cmd": ["./testapps/stubborn.py"],
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            }
+        }
+    }
+}

@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+
+import asyncio
+import datetime
+import json
+import os
+import signal
+import sys
+
+
+class Process (asyncio.SubprocessProtocol):
+
+    SHUTDOWN_GRACE_PERIOD = 5.0
+
+    def __init__(self, name, spec, loop=None):
+        self.name = name
+        self.spec = spec
+        self.loop = loop or asyncio.get_event_loop()
+        self.on_exit = self.loop.create_future()
+        self.reaper = None
+        self.transport = None
+        self.pid = None
+        self.running = False
+        self.returncode = None
+        self.cmd = spec['cmd']
+        if isinstance(self.cmd, str):
+            self.cmd = self.cmd.split()
+        self.env = os.environ.copy()
+        if spec['env']:
+            self.env.update(spec['env'])
+
+    def log(self, msg):
+        print('[{date}][{name}][{pid}] {msg}'.format(
+            date=datetime.datetime.now(),
+            name=self.name,
+            pid=self.pid,
+            msg=msg
+        ))
+
+    def connection_made(self, transport):
+        self.running = True
+        self.transport = transport
+        self.pid = self.transport.get_pid()
+        self.log('process started - {}'.format(self.cmd))
+
+    def pipe_data_received(self, fd, data):
+        lines = data.decode('utf-8').splitlines()
+        for line in lines:
+            self.log(line)
+
+    def process_exited(self):
+        self.running = False
+        self.returncode = self.transport.get_returncode()
+        # TODO: restart if non-zero?
+        self.on_exit.set_result(self.returncode)
+        self.log('process exited with code {}'.format(self.returncode))
+        if self.reaper:
+            self.reaper.cancel()
+            self.reaper = None
+
+    def drop_privs(self):
+        # os.setuid(self.spec['uid'])
+        # os.setgid(self.spec['gid'])
+        pass
+
+    async def spawn(self):
+        transport, protocol = await self.loop.subprocess_exec(lambda: self, *self.cmd, env=self.env, preexec_fn=self.drop_privs)
+        return await self.on_exit
+
+    def shutdown(self, force=False):
+        if self.running:
+            if force:
+                self.log('sending SIGKILL')
+                self.transport.kill()
+            elif self.reaper is None:
+                self.log('sending SIGTERM')
+                self.transport.terminate()
+                self.reaper = self.loop.call_later(self.SHUTDOWN_GRACE_PERIOD, self.shutdown, True)
+
+
+class Runner:
+
+    def __init__(self, config, loop=None):
+        self.config = config
+        self.loop = loop or asyncio.get_event_loop()
+        self.processes = [Process(name, spec) for name, spec in self.config['processes'].items()]
+
+    def shutdown(self):
+        for proc in self.processes:
+            proc.shutdown()
+
+    def run(self):
+        # Install signal handlers for graceful shutdown of all running processes.
+        self.loop.add_signal_handler(signal.SIGINT, self.shutdown)
+        self.loop.add_signal_handler(signal.SIGTERM, self.shutdown)
+        self.loop.run_until_complete(asyncio.gather(*[proc.spawn() for proc in self.processes]))
+
+    async def cleanup(self):
+        # Wait for the on_exit futures of each process to finish.
+        return await asyncio.gather(*[proc.on_exit for proc in self.processes])
+
+
+if __name__ == '__main__':
+    paths = ['/etc/nanny.json', './config.json']
+    config = None
+    if len(sys.argv) > 1:
+        paths.insert(0, sys.argv[1])
+    for path in paths:
+        try:
+            config = json.load(open(path))
+            print('Loaded config from {}'.format(path))
+            break
+        except FileNotFoundError:
+            continue
+    if not config:
+        print('Could not load config file, exiting')
+        sys.exit(1)
+    loop = asyncio.get_event_loop()
+    runner = Runner(config, loop=loop)
+    try:
+        runner.run()
+    finally:
+        # These won't do anything if the processes ended normally, or the loop was shutdown cleanly (via signals),
+        # but make sure we run them anyway in case of an exception.
+        runner.shutdown()
+        loop.run_until_complete(runner.cleanup())
+    loop.close()
