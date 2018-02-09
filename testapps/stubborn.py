@@ -2,6 +2,7 @@
 
 import asyncio
 import signal
+import os
 
 
 def term_handler():
@@ -14,6 +15,7 @@ def int_handler():
 
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
-    loop.add_signal_handler(signal.SIGTERM, term_handler)
-    loop.add_signal_handler(signal.SIGINT, int_handler)
+    if os.name == 'posix':
+        loop.add_signal_handler(signal.SIGTERM, term_handler)
+        loop.add_signal_handler(signal.SIGINT, int_handler)
     loop.run_forever()

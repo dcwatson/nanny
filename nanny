@@ -52,8 +52,8 @@ class Process (asyncio.SubprocessProtocol):
         self.running = False
         self.returncode = self.transport.get_returncode()
         # TODO: restart if non-zero?
-        self.on_exit.set_result(self.returncode)
         self.log('process exited with code {}'.format(self.returncode))
+        self.on_exit.set_result(self.returncode)
         if self.reaper:
             self.reaper.cancel()
             self.reaper = None
@@ -64,7 +64,12 @@ class Process (asyncio.SubprocessProtocol):
         pass
 
     async def spawn(self):
-        transport, protocol = await self.loop.subprocess_exec(lambda: self, *self.cmd, env=self.env, preexec_fn=self.drop_privs)
+        params = {
+            'env': self.env,
+        }
+        if os.name == 'posix':
+            params['preexec_fn'] = self.drop_privs
+        transport, protocol = await self.loop.subprocess_exec(lambda: self, *self.cmd, **params)
         return await self.on_exit
 
     def shutdown(self, force=False):
@@ -83,7 +88,7 @@ class Runner:
     def __init__(self, config, loop=None):
         self.config = config
         self.loop = loop or asyncio.get_event_loop()
-        self.processes = [Process(name, spec) for name, spec in self.config['processes'].items()]
+        self.processes = [Process(name, spec, loop=self.loop) for name, spec in self.config['processes'].items()]
 
     def shutdown(self):
         for proc in self.processes:
@@ -91,8 +96,9 @@ class Runner:
 
     def run(self):
         # Install signal handlers for graceful shutdown of all running processes.
-        self.loop.add_signal_handler(signal.SIGINT, self.shutdown)
-        self.loop.add_signal_handler(signal.SIGTERM, self.shutdown)
+        if os.name == 'posix':
+            self.loop.add_signal_handler(signal.SIGINT, self.shutdown)
+            self.loop.add_signal_handler(signal.SIGTERM, self.shutdown)
         self.loop.run_until_complete(asyncio.gather(*[proc.spawn() for proc in self.processes]))
 
     async def cleanup(self):
@@ -115,10 +121,16 @@ if __name__ == '__main__':
     if not config:
         print('Could not load config file, exiting')
         sys.exit(1)
-    loop = asyncio.get_event_loop()
+    if sys.platform == 'win32':
+        loop = asyncio.ProactorEventLoop()
+        asyncio.set_event_loop(loop)
+    else:
+        loop = asyncio.get_event_loop()
     runner = Runner(config, loop=loop)
     try:
         runner.run()
+    except KeyboardInterrupt:
+        pass
     finally:
         # These won't do anything if the processes ended normally, or the loop was shutdown cleanly (via signals),
         # but make sure we run them anyway in case of an exception.
